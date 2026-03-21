@@ -133,4 +133,29 @@ CREATE TABLE SUBSCRIPTION_INVOICE_LINES (
 -- ── Verify all tables were created ───────────────────────────
 SELECT table_name
 FROM user_tables
-ORDER BY table_name;
+ORDER BY table_name;\
+
+-- ============================================================
+--  IIS Project — Oracle XE 21c
+--  Script 02b: Alter is_active to NUMBER(1) before CSV load
+--
+--  Run as: FDBO, connected to XEPDB1
+--  Run this BEFORE the SQL*Loader control files.
+--
+--  Oracle has no native BOOLEAN column type (before 23c).
+--  We use NUMBER(1) with a CHECK constraint: 1 = true, 0 = false.
+--  The SQL*Loader control file will DECODE 'True'→1, 'False'→0.
+-- ============================================================
+
+-- Table is empty at this point so MODIFY is safe
+ALTER TABLE USERS MODIFY (is_active NUMBER(1));
+
+-- Add a check constraint to enforce only 0 or 1
+ALTER TABLE USERS ADD CONSTRAINT chk_users_is_active
+    CHECK (is_active IN (0, 1));
+
+-- Verify
+SELECT column_name, data_type, data_length
+FROM user_tab_columns
+WHERE table_name = 'USERS'
+AND column_name = 'IS_ACTIVE';
