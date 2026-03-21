@@ -62,7 +62,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-  
+
   # ── DS_3: TIMESCALEDB ─────────────────────────────────────
   # Behavioural analytics — events as a hypertable partitioned
   # on occurred_at. TimescaleDB is PostgreSQL + extension,
@@ -215,8 +215,3 @@ volumes:
   timescale_data:
   mongo_data:
   cassandra_data:
-
-# ── NETWORK ───────────────────────────────────────────────────
-# Single bridge network — all containers resolve each other
-# by service name. Oracle UTL_HTTP uses these names directly:
-#   postgrest-pg, postgrest-ts, restheart, stargate
