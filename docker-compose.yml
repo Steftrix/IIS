@@ -1,0 +1,251 @@
+version: '3.8'
+
+
+services:
+
+  # ── DS_1: ORACLE XE 21c ───────────────────────────────────
+  # All federation views, OLAP queries and UTL_HTTP calls live
+  # here in the FDBO schema. DS_6 seller_profiles.csv is read
+  # directly as an Oracle External Table (no loading needed).
+  oracle:
+    image: container-registry.oracle.com/database/express:21.3.0-xe
+    container_name: oracle-xe-21c
+    ports:
+      - "1521:1521"    # SQL*Net / JDBC
+      - "5500:5500"    # Enterprise Manager Express
+      - "8080:8080"    # ORDS (enable later for L5 bonus)
+    environment:
+      ORACLE_PWD: Oracle21c
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+      - ./data/csv:/opt/oracle/csv:ro          # DS_6 + SQL*Loader inputs
+      - ./oracle/scripts:/opt/oracle/scripts/startup:ro
+    networks:
+      - iis_net
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'SELECT 1 FROM DUAL;' | sqlplus -s system/Oracle21c@//localhost:1521/XEPDB1 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 15
+      start_period: 180s
+
+  # ── DS_2: POSTGRESQL 14 ───────────────────────────────────
+  # Commerce & fulfillment: orders, order_items,
+  # marketplace_invoices, marketplace_invoice_lines.
+  # Oracle reads this via PostgREST on port 3000.
+  postgres:
+    image: postgres:14-alpine
+    container_name: iis-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: iis_user
+      POSTGRES_PASSWORD: iis_pass
+      POSTGRES_DB: iis_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./data/csv:/csv:ro
+      - ./postgres/scripts:/docker-entrypoint-initdb.d:ro
+    networks:
+      - iis_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iis_user -d iis_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgREST for DS_2 — exposes iis_db on port 3000
+  # Oracle: UTL_HTTP.REQUEST('http://postgrest-pg:3000/orders')
+  postgrest-pg:
+    image: postgrest/postgrest:v12.0.2
+    container_name: iis-postgrest-pg
+    ports:
+      - "3000:3000"
+    environment:
+      PGRST_DB_URI: postgres://iis_user:iis_pass@postgres:5432/iis_db
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: iis_user
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - iis_net
+
+  # ── DS_3: TIMESCALEDB ─────────────────────────────────────
+  # Behavioural analytics — events as a hypertable partitioned
+  # on occurred_at. TimescaleDB is PostgreSQL + extension,
+  # so it gets PostgREST for free (port 3001).
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    container_name: iis-timescaledb
+    ports:
+      - "5433:5432"    # host 5433 to avoid clash with DS_2
+    environment:
+      POSTGRES_USER: iis_user
+      POSTGRES_PASSWORD: iis_pass
+      POSTGRES_DB: iis_events
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./data/csv:/csv:ro
+      - ./timescaledb/scripts:/docker-entrypoint-initdb.d:ro
+    networks:
+      - iis_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iis_user -d iis_events"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgREST for DS_3 — exposes iis_events on port 3001
+  # Oracle: UTL_HTTP.REQUEST('http://postgrest-ts:3000/events?occurred_at=gte.2025-01-01')
+  postgrest-ts:
+    image: postgrest/postgrest:v12.0.2
+    container_name: iis-postgrest-ts
+    ports:
+      - "3001:3000"
+    environment:
+      PGRST_DB_URI: postgres://iis_user:iis_pass@timescaledb:5432/iis_events
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: iis_user
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3001
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - iis_net
+
+  # ── DS_4: MONGODB 6 ───────────────────────────────────────
+  # Product catalog. The 'attributes' column in products.csv
+  # is a JSON string that maps to native BSON in MongoDB —
+  # a natural fit that justifies the document store choice.
+  # Oracle reads this via RestHeart on port 8081.
+  mongodb:
+    image: mongo:6
+    container_name: iis-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: iis_admin
+      MONGO_INITDB_ROOT_PASSWORD: iis_pass
+      MONGO_INITDB_DATABASE: iis_db
+    volumes:
+      - mongo_data:/data/db
+      - ./data/csv:/csv:ro
+      - ./mongodb/scripts:/docker-entrypoint-initdb.d:ro
+    networks:
+      - iis_net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # RestHeart v7 for DS_4 — REST wrapper for MongoDB on port 8081
+  # Oracle: UTL_HTTP.REQUEST('http://restheart:8080/iis_db/products')
+  # Test:   GET http://localhost:8081/iis_db/products
+  restheart:
+    image: softinstigate/restheart:7.6.4
+    container_name: iis-restheart
+    ports:
+      - "8081:8080"
+    environment:
+      RHO: >
+        /mclient/connection-string->
+        'mongodb://iis_admin:iis_pass@mongodb:27017/?authSource=admin'
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - iis_net
+
+  # ── DS_6: CASSANDRA 4 ─────────────────────────────────────
+  # Wide-column session store. Rows have a native TTL matching
+  # the session expiry — no cleanup job needed, Cassandra
+  # tombstones them automatically.
+  # ⚠  Needs ~90 seconds to reach UN (Up/Normal) status.
+  #    Check: docker exec iis-cassandra nodetool status
+  cassandra:
+    image: cassandra:4.1
+    container_name: iis-cassandra
+    ports:
+      - "9042:9042"    # CQL native (cqlsh / DBeaver)
+    environment:
+      CASSANDRA_CLUSTER_NAME: iis_cluster
+      CASSANDRA_DC: dc1
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+      - ./cassandra/scripts:/scripts:ro
+    networks:
+      - iis_net
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -q UN || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 90s
+
+  # Stargate — REST sidecar for DS_6 (Cassandra) on port 8082.
+  # Two containers, one datasource. Same UTL_HTTP pattern as
+  # PostgREST and RestHeart.
+  # Oracle: UTL_HTTP.REQUEST('http://stargate:8082/v2/keyspaces/iis/sessions/SESSION_ID')
+  # Test:   GET http://localhost:8082/v2/keyspaces
+  stargate:
+    image: stargateio/stargate-4_0:v1.0.77
+    container_name: iis-stargate
+    ports:
+      - "8082:8082"    # REST API
+      - "8085:8085"    # Health
+    environment:
+      CASSANDRA_SEEDS: cassandra
+      CLUSTER_NAME: iis_cluster
+      CLUSTER_VERSION: "4.0"
+      DEVELOPER_MODE: "true"
+      JAVA_OPTS: "-Xmx512m"
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    networks:
+      - iis_net
+
+  # ── L5: SPRING BOOT REST ──────────────────────────────────
+  # Uncomment once the Spring Boot project is created.
+  # Connects to Oracle FDBO schema and exposes integration
+  # views as JSON REST endpoints.
+  #
+  # springboot:
+  #   build:
+  #     context: ./springboot
+  #     dockerfile: Dockerfile
+  #   container_name: iis-springboot
+  #   ports:
+  #     - "8083:8080"
+  #   environment:
+  #     SPRING_DATASOURCE_URL: jdbc:oracle:thin:@oracle:1521/XEPDB1
+  #     SPRING_DATASOURCE_USERNAME: FDBO
+  #     SPRING_DATASOURCE_PASSWORD: fdbo_pass
+  #     SPRING_DATASOURCE_DRIVER_CLASS_NAME: oracle.jdbc.OracleDriver
+  #   depends_on:
+  #     oracle:
+  #       condition: service_healthy
+  #   networks:
+  #     - iis_net
+
+# ── VOLUMES ───────────────────────────────────────────────────
+volumes:
+  oracle_data:
+  postgres_data:
+  timescale_data:
+  mongo_data:
+  cassandra_data:
+
+# ── NETWORK ───────────────────────────────────────────────────
+# Single bridge network — all containers resolve each other
+# by service name. Oracle UTL_HTTP uses these names directly:
+#   postgrest-pg, postgrest-ts, restheart, stargate
+networks:
+  iis_net:
+    driver: bridge
