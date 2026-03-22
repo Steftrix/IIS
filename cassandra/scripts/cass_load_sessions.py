@@ -11,6 +11,8 @@ Why Python instead of COPY FROM:
     that confuse plain COPY FROM
 
 Run inside the container:
+  docker exec iis-cassandra mkdir -p /csv
+  docker cp data\csv\sessions.csv iis-cassandra:/csv/sessions.csv
   docker cp cassandra\scripts\cass_load_sessions.py iis-cassandra:/tmp/load_sessions.py
   docker exec iis-cassandra python3 /tmp/load_sessions.py
 """
