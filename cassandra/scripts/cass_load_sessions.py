@@ -25,10 +25,9 @@ CSV_PATH = "/csv/sessions.csv"
 KEYSPACE = "iis"
 TABLE    = "sessions"
 
-# Timestamp formats found in the CSV
 TS_FORMATS = [
-    "%Y-%m-%dT%H:%M:%S%z",   # 2025-10-11T10:28:01+00:00
-    "%Y-%m-%dT%H:%M:%S.%f%z" # with microseconds
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f%z"
 ]
 
 def parse_ts(val):
@@ -42,17 +41,23 @@ def parse_ts(val):
     return None
 
 def calc_ttl(expires_at_dt):
-    """Return seconds until expiry, minimum 1. Negative = already expired."""
     if expires_at_dt is None:
-        return 86400  # default 1 day if missing
+        return 86400
     now = datetime.now(timezone.utc)
     ttl = int((expires_at_dt - now).total_seconds())
-    return max(ttl, 1)  # Cassandra TTL must be >= 1
+    return max(ttl, 1)
 
-def escape_cql(val):
-    if val is None:
+def escape_str(val):
+    """Escape a string value for CQL — wrapped in single quotes."""
+    if val is None or str(val).strip() == "":
         return "null"
     return "'" + str(val).replace("'", "''") + "'"
+
+def format_uuid(val):
+    """UUIDs in CQL are bare — no quotes."""
+    if val is None or str(val).strip() == "":
+        return "null"
+    return str(val).strip()
 
 def ts_to_cql(dt):
     if dt is None:
@@ -61,13 +66,15 @@ def ts_to_cql(dt):
 
 def run_cql(cql):
     result = subprocess.run(
-        ["cqlsh", "-u", "cassandra", "-p", "cassandra",
-         "--execute", cql],
+        ["cqlsh", "-u", "cassandra", "-p", "cassandra", "--execute", cql],
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        print(f"  CQL ERROR: {result.stderr.strip()}")
-        return False
+        err = result.stderr.strip()
+        # Ignore the password warning, only fail on real errors
+        if "InvalidRequest" in err or "SyntaxException" in err:
+            print(f"  CQL ERROR: {err}")
+            return False
     return True
 
 print(f"Loading {CSV_PATH} into Cassandra {KEYSPACE}.{TABLE}...")
@@ -81,26 +88,24 @@ with open(CSV_PATH, newline='', encoding='utf-8') as f:
         expires_at = parse_ts(row.get('expires_at', ''))
         ttl = calc_ttl(expires_at)
 
-        # Skip rows that expired more than 30 days ago
         if ttl < -2592000:
             skipped += 1
             continue
 
-        cql = f"""
-INSERT INTO {KEYSPACE}.{TABLE}
-    (id, user_id, cart, ip_address, user_agent,
-     created_at, last_active_at, expires_at)
-VALUES (
-    {escape_cql(row['id'])},
-    {escape_cql(row['user_id']) if row['user_id'] else 'null'},
-    {escape_cql(row['cart'])},
-    {escape_cql(row['ip_address'])},
-    {escape_cql(row['user_agent'])},
-    {ts_to_cql(parse_ts(row['created_at']))},
-    {ts_to_cql(parse_ts(row['last_active_at']))},
-    {ts_to_cql(expires_at)}
-) USING TTL {max(ttl, 1)};
-""".strip()
+        cql = (
+            f"INSERT INTO {KEYSPACE}.{TABLE} "
+            f"(id, user_id, cart, ip_address, user_agent, created_at, last_active_at, expires_at) "
+            f"VALUES ("
+            f"{escape_str(row['id'])}, "
+            f"{format_uuid(row['user_id'])}, "
+            f"{escape_str(row['cart'])}, "
+            f"{escape_str(row['ip_address'])}, "
+            f"{escape_str(row['user_agent'])}, "
+            f"{ts_to_cql(parse_ts(row['created_at']))}, "
+            f"{ts_to_cql(parse_ts(row['last_active_at']))}, "
+            f"{ts_to_cql(expires_at)}"
+            f") USING TTL {max(ttl, 1)};"
+        )
 
         if run_cql(cql):
             loaded += 1
@@ -111,7 +116,6 @@ VALUES (
 
 print(f"\nDone. Loaded: {loaded}  Skipped: {skipped}")
 
-# Verify
 result = subprocess.run(
     ["cqlsh", "-u", "cassandra", "-p", "cassandra",
      "--execute", f"SELECT COUNT(*) FROM {KEYSPACE}.{TABLE};"],
