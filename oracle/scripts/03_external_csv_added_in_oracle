@@ -1,0 +1,41 @@
+CREATE TABLE EXT_SELLER_PROFILES (
+    user_id        VARCHAR2(36),
+    display_name   VARCHAR2(200),
+    legal_name     VARCHAR2(200),
+    tax_id         VARCHAR2(50),
+    payout_email   VARCHAR2(200),
+    country_code   VARCHAR2(5),
+    is_verified    VARCHAR2(5),
+    bio            VARCHAR2(1000),
+    created_at     VARCHAR2(30),
+    updated_at     VARCHAR2(30)
+)
+ORGANIZATION EXTERNAL (
+    TYPE ORACLE_LOADER
+    DEFAULT DIRECTORY EXT_FILE_DS
+    ACCESS PARAMETERS (
+        RECORDS DELIMITED BY NEWLINE
+        SKIP 1
+        NOBADFILE
+        NODISCARDFILE
+        NOLOGFILE
+        FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"'
+        MISSING FIELD VALUES ARE NULL
+        (
+            user_id,
+            display_name,
+            legal_name,
+            tax_id,
+            payout_email,
+            country_code,
+            is_verified,
+            bio,
+            created_at,
+            updated_at
+        )
+    )
+    LOCATION ('seller_profiles.csv')
+)
+REJECT LIMIT UNLIMITED;
+
+SELECT * FROM EXT_SELLER_PROFILES;
