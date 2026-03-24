@@ -1,9 +1,6 @@
 services:
 
   # ── DS_1: ORACLE XE 21c ───────────────────────────────────
-  # All federation views, OLAP queries and UTL_HTTP calls live
-  # here in the FDBO schema. DS_6 seller_profiles.csv is read
-  # directly as an Oracle External Table (no loading needed).
   oracle:
     image: container-registry.oracle.com/database/express:21.3.0-xe
     container_name: oracle-xe-21c
@@ -25,9 +22,6 @@ services:
       start_period: 180s
 
   # ── DS_2: POSTGRESQL 14 ───────────────────────────────────
-  # Commerce & fulfillment: orders, order_items,
-  # marketplace_invoices, marketplace_invoice_lines.
-  # Oracle reads this via PostgREST on port 3000.
   postgres:
     image: postgres:14-alpine
     container_name: iis-postgres
@@ -48,7 +42,6 @@ services:
       retries: 5
 
   # PostgREST for DS_2 — exposes iis_db on port 3000
-  # Oracle: UTL_HTTP.REQUEST('http://postgrest-pg:3000/orders')
   postgrest-pg:
     image: postgrest/postgrest:v12.0.2
     container_name: iis-postgrest-pg
@@ -64,14 +57,11 @@ services:
         condition: service_healthy
 
   # ── DS_3: TIMESCALEDB ─────────────────────────────────────
-  # Behavioural analytics — events as a hypertable partitioned
-  # on occurred_at. TimescaleDB is PostgreSQL + extension,
-  # so it gets PostgREST for free (port 3001).
   timescaledb:
     image: timescale/timescaledb:latest-pg14
     container_name: iis-timescaledb
     ports:
-      - "5433:5432"    # host 5433 to avoid clash with DS_2
+      - "5433:5432"    
     environment:
       POSTGRES_USER: iis_user
       POSTGRES_PASSWORD: iis_pass
@@ -103,10 +93,6 @@ services:
         condition: service_healthy
 
   # ── DS_4: MONGODB 6 ───────────────────────────────────────
-  # Product catalog. The 'attributes' column in products.csv
-  # is a JSON string that maps to native BSON in MongoDB —
-  # a natural fit that justifies the document store choice.
-  # Oracle reads this via RestHeart on port 8081.
   mongodb:
     image: mongo:6
     container_name: iis-mongodb
@@ -128,62 +114,38 @@ services:
       start_period: 30s
 
   # RestHeart v7 for DS_4 — REST wrapper for MongoDB on port 8081
-  # Oracle: UTL_HTTP.REQUEST('http://restheart:8080/iis_db/products')
-  # Test:   GET http://localhost:8081/iis_db/products
   restheart:
     image: softinstigate/restheart:7.6.4
     container_name: iis-restheart
     ports:
       - "8081:8080"
     environment:
-      RHO: "/mclient/connection-string->'mongodb://iis_admin:iis_pass@mongodb:27017/?authSource=admin';/http-listener/host->'0.0.0.0';/mongo/uri->'/';/mongo/secured->false"
+      RHO: "/mclient/connection-string->'mongodb://iis_admin:iis_pass@mongodb:27017/?authSource=admin';/http-listener/host->'0.0.0.0';/mongo/mongo-mounts->[{'what':'iis_db','where':'/'}];/mongo/secured->false"
+      
 
-  # ── DS_6: CASSANDRA 4 ─────────────────────────────────────
-  # Wide-column session store. Rows have a native TTL matching
-  # the session expiry — no cleanup job needed, Cassandra
-  # tombstones them automatically.
-  # ⚠  Needs ~90 seconds to reach UN (Up/Normal) status.
-  #    Check: docker exec iis-cassandra nodetool status
-  cassandra:
-    image: cassandra:4.1
-    container_name: iis-cassandra
+  # ── DS_5: NEO4J 5 ─────────────────────────────────────────
+  neo4j:
+    image: neo4j:5
+    container_name: iis-neo4j
     ports:
-      - "9042:9042"    # CQL native (cqlsh / DBeaver)
+      - "7474:7474"    # HTTP REST API + Browser UI
+      - "7687:7687"    # Bolt (used by Neo4j Browser internally)
     environment:
-      CASSANDRA_CLUSTER_NAME: iis_cluster
-      CASSANDRA_DC: dc1
-      MAX_HEAP_SIZE: 512M
-      HEAP_NEWSIZE: 128M
+      NEO4J_AUTH: neo4j/neo4j_admin
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
     volumes:
-      - cassandra_data:/var/lib/cassandra
-      - ./cassandra/scripts:/scripts:ro
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./neo4j/import:/var/lib/neo4j/import   # CSVs for Cypher LOAD CSV
     healthcheck:
-      test: ["CMD-SHELL", "nodetool status | grep -q UN || exit 1"]
-      interval: 30s
-      timeout: 15s
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
+      interval: 15s
+      timeout: 10s
       retries: 10
-      start_period: 90s
-
-  # Stargate — REST sidecar for DS_6 (Cassandra) on port 8082.
-  # Two containers, one datasource. Same UTL_HTTP pattern as
-  # PostgREST and RestHeart.
-  # Oracle: UTL_HTTP.REQUEST('http://stargate:8082/v2/keyspaces/iis/sessions/SESSION_ID')
-  # Test:   GET http://localhost:8082/v2/keyspaces
-  stargate:
-    image: stargateio/stargate-4_0:v1.0.77
-    container_name: iis-stargate
-    ports:
-      - "8082:8082"    # REST API
-      - "8085:8085"    # Health
-    environment:
-      CASSANDRA_SEEDS: cassandra
-      CLUSTER_NAME: iis_cluster
-      CLUSTER_VERSION: "4.0"
-      DEVELOPER_MODE: "true"
-      JAVA_OPTS: "-Xmx512m"
-    depends_on:
-      cassandra:
-        condition: service_healthy
+      start_period: 60s
+ 
 
   # ── L5: SPRING BOOT REST ──────────────────────────────────
   # Uncomment once the Spring Boot project is created.
@@ -205,8 +167,7 @@ services:
   #   depends_on:
   #     oracle:
   #       condition: service_healthy
-  #   networks:
-  #     - iis_net
+
 
 # ── VOLUMES ───────────────────────────────────────────────────
 volumes:
@@ -214,4 +175,5 @@ volumes:
   postgres_data:
   timescale_data:
   mongo_data:
-  cassandra_data:
+  neo4j_data:
+  neo4j_logs:
