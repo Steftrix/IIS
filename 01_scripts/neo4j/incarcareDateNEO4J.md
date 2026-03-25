@@ -21,11 +21,16 @@ FOR (o:Order) REQUIRE o.id IS UNIQUE;
 
 3. 
 
-CREATE CONSTRAINT product_id IF NOT EXISTS
-FOR (p:Product) REQUIRE p.id IS UNIQUE;
-
-CREATE CONSTRAINT order_id IF NOT EXISTS
-FOR (o:Order) REQUIRE o.id IS UNIQUE;
+CALL apoc.periodic.iterate(
+  "LOAD CSV WITH HEADERS FROM 'file:///order_items.csv' AS row RETURN row",
+  "
+    MERGE (o:Order {id: row.order_id})
+    WITH o, row
+    MATCH (p:Product {id: row.product_id})
+    MERGE (o)-[:CONTAINS]->(p)
+  ",
+  {batchSize: 10000, parallel: true}
+);
 
 4. 
 
