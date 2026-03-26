@@ -27,7 +27,6 @@ SET DEFINE OFF
 --- ============================================================
 -- Helper functions for large JSON payloads over HTTP
 -- ============================================================
-
 CREATE OR REPLACE FUNCTION FDBO.GET_PG_ORDERS_JSON
 RETURN CLOB
 IS
@@ -56,6 +55,8 @@ EXCEPTION
 END;
 /
 SHOW ERRORS;
+
+
 
 CREATE OR REPLACE FUNCTION FDBO.GET_PG_ORDER_ITEMS_JSON
 RETURN CLOB
@@ -86,6 +87,8 @@ END;
 /
 SHOW ERRORS;
 
+
+
 CREATE OR REPLACE FUNCTION FDBO.GET_PG_MKT_INVOICES_JSON
 RETURN CLOB
 IS
@@ -114,6 +117,8 @@ EXCEPTION
 END;
 /
 SHOW ERRORS;
+
+
 
 CREATE OR REPLACE FUNCTION FDBO.GET_TS_EVENTS_JSON
 RETURN CLOB
@@ -145,6 +150,34 @@ END;
 SHOW ERRORS;
 
 
+
+CREATE OR REPLACE FUNCTION FDBO.GET_MG_PRODUCTS_JSON
+RETURN CLOB
+IS
+    req   UTL_HTTP.req;
+    resp  UTL_HTTP.resp;
+    buf   VARCHAR2(32767);
+    cl    CLOB;
+BEGIN
+    req := UTL_HTTP.begin_request(
+        'http://restheart:8080/products?pagesize=1000'
+    );
+
+    resp := UTL_HTTP.get_response(req);
+
+    DBMS_LOB.createtemporary(cl, TRUE);
+
+    LOOP
+        UTL_HTTP.read_text(resp, buf, 32767);
+        DBMS_LOB.writeappend(cl, LENGTH(buf), buf);
+    END LOOP;
+
+EXCEPTION
+    WHEN UTL_HTTP.end_of_body THEN
+        UTL_HTTP.end_response(resp);
+        RETURN cl;
+END;
+/
 -- ============================================================
 -- 01. V_PG_ORDERS
 -- Source:
@@ -244,53 +277,23 @@ JSON_TABLE(
         user_id     VARCHAR2(36)   PATH '$.user_id',
         event_type  VARCHAR2(100)  PATH '$.event_type',
         product_id  VARCHAR2(36)   PATH '$.product_id',
-        metadata    CLOB           PATH '$.metadata',
+        metadata    CLOB           FORMAT JSON PATH '$.metadata',
         occurred_at VARCHAR2(50)   PATH '$.occurred_at'
     )
 ) jt;
 /
 SHOW ERRORS;
-
 -- ============================================================
 -- 05. V_MG_PRODUCTS
 -- Source:
 --   MongoDB products via RestHeart
 -- ============================================================
--- Due to the massive size of the mongodb, we use a function to return the response to CLOB instead of VARCHAR2
-CREATE OR REPLACE FUNCTION get_products_json
-RETURN CLOB
-IS
-    req   UTL_HTTP.req;
-    resp  UTL_HTTP.resp;
-    buf   VARCHAR2(32767);
-    cl    CLOB;
-BEGIN
-    req := UTL_HTTP.begin_request(
-        'http://restheart:8080/products?pagesize=1000'
-    );
-
-    resp := UTL_HTTP.get_response(req);
-
-    DBMS_LOB.createtemporary(cl, TRUE);
-
-    LOOP
-        UTL_HTTP.read_text(resp, buf, 32767);
-        DBMS_LOB.writeappend(cl, LENGTH(buf), buf);
-    END LOOP;
-
-EXCEPTION
-    WHEN UTL_HTTP.end_of_body THEN
-        UTL_HTTP.end_response(resp);
-        RETURN cl;
-END;
-/
--- The View is here
 CREATE OR REPLACE VIEW FDBO.V_MG_PRODUCTS AS
 SELECT jt.id, jt.seller_id, jt.name, jt.slug, jt.product_type, jt.description, jt.price_usd, jt.currency, jt.is_active,
     DATE '1970-01-01' + (jt.created_at_ms/1000)/86400  AS created_at,
     DATE '1970-01-01' + (jt.updated_at_ms/1000)/86400  AS updated_at
 FROM (
-    SELECT get_products_json() doc
+    SELECT GET_MG_PRODUCTS_JSON() doc
     FROM dual
 ),
 JSON_TABLE(
@@ -311,6 +314,7 @@ JSON_TABLE(
 
     )
 ) jt;
+
 -- ============================================================
 -- 06. V_NEO4J_BOUGHT_WITH
 -- Source:
@@ -339,5 +343,3 @@ FROM JSON_TABLE( (SELECT doc FROM json), '$.data.values[*]'
         co_purchase_count NUMBER        PATH '$[4]' NULL ON ERROR
     )
 );
-
-Select * from V_NEO4J_BOUGHT_WITH
