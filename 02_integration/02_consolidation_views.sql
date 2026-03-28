@@ -114,3 +114,44 @@ JOIN FDBO.V_PG_ORDER_ITEMS oi
     ON oi.product_id = p.product_id
 JOIN FDBO.V_PG_ORDERS o
     ON o.id = oi.order_id;
+-- ============================================================
+-- 4. V_CONS_INVOICES
+-- Description:
+--    Consolidated billing view joining subscription-based 
+--    invoices with marketplace-specific invoices and user metadata.
+-- Can be used for:
+--    - Unified customer billing history
+--    - AR (Accounts Receivable) aging and status tracking
+--    - Comparing subscription vs. marketplace revenue per user
+--    - Financial auditing and payment reconciliation
+-- ============================================================
+CREATE OR REPLACE VIEW FDBO.V_CONS_INVOICES AS
+SELECT 
+    si.ID AS invoice_id,
+    si.User_ID AS user_id,
+    u.FULL_NAME as full_name,
+    si.INVOICE_TYPE,
+    si.Status AS invoice_status,
+    si.TOTAL_USD AS amount_usd,
+    si.BILLING_PERIOD_START,
+    si.BILLING_PERIOD_END,
+    si.PAID_AT,
+    si.DUE_AT,
+    u.ID AS user_id_ref
+FROM FDBO.SUBSCRIPTION_INVOICES si
+INNER JOIN FDBO.USERS u ON si.USER_ID = u.ID
+UNION ALL
+SELECT 
+    sm.ID AS invoice_id,
+    sm.USER_ID AS user_id,
+    u.FULL_NAME as full_name,
+    NULL AS invoice_type,
+    sm.STATUS AS invoice_status,
+    sm.TOTAL_USD AS amount_usd,
+    NULL AS billing_period_start,
+    NULL AS billing_period_end,
+    NULL AS paid_at,
+    NULL AS due_at,
+    u.ID AS user_id_ref
+FROM FDBO.V_PG_MKT_INVOICES sm
+INNER JOIN FDBO.USERS u ON sm.USER_ID = u.ID;

@@ -25,47 +25,11 @@
 --   - They do not contain measures or aggregations.
 --   - They are designed for reuse across multiple analytical queries.
 -- ============================================================
-
--- ============================================================
--- 01. V_DIM_USERS
--- Description:
---   User dimension view providing descriptive user attributes.
--- ============================================================
-
-CREATE OR REPLACE VIEW FDBO.V_DIM_USERS AS
-SELECT
-    user_id,
-    user_email,
-    user_full_name,
-    user_country_code,
-    user_city,
-    user_created_at,
-    user_last_login_at,
-    user_is_active
-FROM FDBO.V_CONS_USERS;
-/
-
--- ============================================================
--- 02. V_DIM_SUBSCRIPTION_TIERS
--- Description:
---   Subscription tier dimension view.
--- ============================================================
-
-CREATE OR REPLACE VIEW FDBO.V_DIM_SUBSCRIPTION_TIERS AS
-SELECT
-    tier_id,
-    tier_name,
-    tier_description
-FROM FDBO.V_CONS_SUBSCRIPTION_TIERS;
-/
-
--- ============================================================
--- 03. V_DIM_TIME
+-- 1. V_DIM_TIME
 -- Description:
 --   Time dimension derived from multiple date sources.
 --   Enables analysis by year, month, quarter.
 -- ============================================================
-
 CREATE OR REPLACE VIEW FDBO.V_DIM_TIME AS
 SELECT DISTINCT
     TRUNC(dt, 'DD') AS date_key,
@@ -83,40 +47,97 @@ FROM (
     UNION
     SELECT CAST(order_created_at AS DATE) AS dt FROM FDBO.V_CONS_PG_ORDERS
 );
-/
-
 -- ============================================================
--- 04. V_DIM_ORDER_STATUS
+-- 2. V_DIM_PRODUCT
 -- Description:
---   Order status dimension.
+--    Product dimension with price-based segmentation.
+--    Categorizes products into budget, mid-range, premium, or luxury bands.
+-- Can be used for:
+--    - Price sensitivity analysis
+--    - Catalog distribution reporting
+--    - Revenue breakdown by price category
 -- ============================================================
-
-CREATE OR REPLACE VIEW FDBO.V_DIM_ORDER_STATUS AS
-SELECT DISTINCT
-    order_status
-FROM FDBO.V_CONS_PG_ORDERS;
-/
-
+CREATE OR REPLACE VIEW FDBO.V_DIM_PRODUCT AS
+SELECT
+    p.product_id,
+    p.name                  AS product_name,
+    p.slug,
+    p.product_type,
+    p.price_usd,
+    p.currency,
+    p.is_active,
+    p.seller_id,
+    p.created_at            AS product_created_at,
+    CASE
+        WHEN p.price_usd < 20  THEN 'budget'
+        WHEN p.price_usd < 60  THEN 'mid_range'
+        WHEN p.price_usd < 120 THEN 'premium'
+        ELSE 'luxury'
+    END                     AS price_band
+FROM FDBO.MV_MG_PRODUCTS p;
 -- ============================================================
--- 05. V_DIM_INVOICE_STATUS
+-- 3. V_DIM_SELLER
 -- Description:
---   Invoice status dimension.
+--    Seller dimension with maturity tracking based on tenure.
+--    Handles ISO 8601 timestamp conversion from external CSV sources.
+-- Can be used for:
+--    - Seller lifecycle analysis (New vs. Veteran)
+--    - Payout and verification status monitoring
+--    - Cohort analysis by seller registration date
 -- ============================================================
-
-CREATE OR REPLACE VIEW FDBO.V_DIM_INVOICE_STATUS AS
-SELECT DISTINCT
-    invoice_status
-FROM FDBO.V_CONS_SUB_INVOICES;
-/
-
+CREATE OR REPLACE VIEW FDBO.V_DIM_SELLER AS
+WITH formatted_sellers AS (
+    SELECT 
+        s.*,
+        CAST(TO_TIMESTAMP_TZ(
+            TRIM(BOTH '"' FROM s.created_at), 
+            'YYYY-MM-DD"T"HH24:MI:SSTZH:TZM'
+        ) AS DATE) as created_at_dt
+    FROM FDBO.EXT_SELLER_PROFILES s
+)
+SELECT
+    user_id,
+    display_name,
+    legal_name,
+    payout_email,
+    country_code,
+    created_at_dt           AS created_at,
+    is_verified,
+    CASE
+        WHEN created_at_dt >= ADD_MONTHS(SYSDATE, -6)  THEN 'new'
+        WHEN created_at_dt >= ADD_MONTHS(SYSDATE, -24) THEN 'established'
+        ELSE 'veteran'
+    END                     AS seller_maturity
+FROM formatted_sellers;
 -- ============================================================
--- 06. V_DIM_SUBSCRIPTION_STATUS
+-- 4. V_DIM_PRODUCT_AFFINITY_TYPE
 -- Description:
---   Subscription status dimension.
+--    Graph-derived dimension mapping product co-purchase relationships.
+--    Identifies if paired products share types or sellers.
+-- Can be used for:
+--    - Market basket analysis (Frequently Bought Together)
+--    - Cross-selling and up-selling strategy
+--    - Analyzing seller loyalty vs. product type preference
 -- ============================================================
-
-CREATE OR REPLACE VIEW FDBO.V_DIM_SUBSCRIPTION_STATUS AS
-SELECT DISTINCT
-    subscription_status
-FROM FDBO.V_CONS_SUBSCRIPTIONS;
-/
+CREATE OR REPLACE VIEW FDBO.V_DIM_PRODUCT_AFFINITY_TYPE AS
+SELECT
+    nb.product_1_id,
+    nb.product_2_id,
+    nb.co_purchase_count,
+    p1.product_type         AS product_1_type,
+    p2.product_type         AS product_2_type,
+    p1.seller_id            AS product_1_seller_id,
+    p2.seller_id            AS product_2_seller_id,
+    CASE
+        WHEN p1.product_type = p2.product_type THEN 'same_type'
+        ELSE 'cross_type'
+    END                     AS affinity_type_category,
+    CASE
+        WHEN p1.seller_id = p2.seller_id THEN 'same_seller'
+        ELSE 'cross_seller'
+    END                     AS affinity_seller_category
+FROM FDBO.V_NEO4J_BOUGHT_WITH nb
+LEFT JOIN FDBO.MV_MG_PRODUCTS p1
+    ON p1.product_id = nb.product_1_id
+LEFT JOIN FDBO.MV_MG_PRODUCTS p2
+    ON p2.product_id = nb.product_2_id;
