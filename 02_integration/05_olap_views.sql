@@ -426,96 +426,81 @@ FROM grouped_set;
 -- ============================================================
 -- ============================================================
 -- ============================================================
--- 5. V_OLAP_FUNNEL_CONVERSION_BY_TIER
+-- 5. V_OLAP_SUB_RETENTION_COHORT
 --
 -- Purpose:
---   Analyzes the customer journey funnel (Awareness -> Consideration -> Conversion)
---   segmented by subscription tier and product category.
---   Provides granular conversion rates and purchase rates using multidimensional 
---   grouping sets for flexible reporting.
+--   Performs longitudinal cohort analysis to track subscriber 
+--   retention and cumulative attrition. It identifies how 
+--   specific "joining groups" survive over time across tiers.
 --
--- OLAP feature: GROUPING SETS (Tier, Stage, Product, Month)
--- Source views: V_CONS_USER_ACTIVITY, V_CONS_USER_SUBSCRIPTION
+-- OLAP features: 
+--   - Cumulative Windowing: SUM(...) OVER (Rows Unbounded Preceding) 
+--     to track total loss since cohort inception.
+--   - Moving Averages: AVG(...) OVER (Rows 2 Preceding) 
+--     to smooth out seasonal churn spikes.
+--   - Lead Analysis: LEAD(...) to project churn into the following month.
+--
+-- Source views: V_CONS_SUB_COHORT
 --
 -- Output columns:
---   tier_name          - User's current subscription level
---   funnel_stage       - Categorized intent (Awareness/Consideration/Conversion)
---   product_type       - The type of product interacted with
---   event_month        - The month the activity occurred
---   total_events       - Raw count of all activities in that group
---   unique_users       - Distinct user count (Reach)
---   purchase_rate_pct   - Percentage of total events that were purchases
---   conversion_rate_pct - Percentage of events that were "lower-funnel" actions
+--   tier_name             - Subscription plan name
+--   cohort_month          - Original join month of the user group
+--   cumulative_churned    - Total users lost from the original cohort
+--   survival_rate_pct     - Percentage of users remaining active
+--   rolling_3m_churn_rate - Smoothed monthly churn trend
+--   next_month_churn_proj - Projected churn rate based on subsequent data
 -- ============================================================
 -- ============================================================
 -- ============================================================
-CREATE OR REPLACE VIEW FDBO.V_OLAP_FUNNEL_CONVERSION_BY_TIER AS
-WITH funnel_base AS (
+CREATE OR REPLACE VIEW FDBO.V_OLAP_SUB_RETENTION_COHORT AS
+WITH cohort_monthly AS (
     SELECT
-        ua.user_id,
-        TRUNC(CAST(ua.occurred_at AS DATE), 'MM') AS event_month,
-        us.tier_name,
-        ua.product_type,
-        ua.event_type,
-        CASE
-            WHEN ua.event_type IN ('page_view','search')
-                THEN 'awareness'
-            WHEN ua.event_type IN ('product_view','add_to_cart')
-                THEN 'consideration'
-            WHEN ua.event_type IN ('checkout_start','purchase')
-                THEN 'conversion'
-            ELSE 'other'
-        END                             AS funnel_stage,
-        CASE
-            WHEN ua.event_type IN (
-                'add_to_cart','checkout_start','purchase'
-            ) THEN 1 ELSE 0
-        END                             AS is_conversion_event,
-        CASE
-            WHEN ua.event_type = 'purchase' THEN 1
-            ELSE 0
-        END                             AS is_purchase
-    FROM FDBO.V_CONS_USER_ACTIVITY ua
-    LEFT JOIN (
-        SELECT user_id, tier_name
-        FROM (
-            SELECT user_id, tier_name,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY user_id
-                       ORDER BY started_at DESC
-                   ) AS rn
-            FROM FDBO.V_CONS_USER_SUBSCRIPTION
-        ) WHERE rn = 1
-    ) us ON us.user_id = ua.user_id
+        tier_name,
+        cohort_month,
+        COUNT(*)          AS cohort_size,
+        SUM(churned_flag) AS churned_this_month
+    FROM FDBO.V_CONS_SUB_COHORT
+    GROUP BY
+        tier_name,
+        cohort_month
+),
+with_windows AS (
+    SELECT
+        tier_name,
+        cohort_month,
+        cohort_size,
+        churned_this_month,
+        SUM(churned_this_month) OVER (
+            PARTITION BY tier_name
+            ORDER BY cohort_month
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        )                                                             AS cumulative_churned,
+        ROUND(churned_this_month / NULLIF(cohort_size, 0) * 100, 2)   AS churn_rate_pct,
+        ROUND(
+            AVG(churned_this_month / NULLIF(cohort_size, 0) * 100) OVER (
+                PARTITION BY tier_name
+                ORDER BY cohort_month
+                ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+            ), 2)                                                     AS rolling_3m_churn_rate,
+        LEAD(
+            ROUND(churned_this_month / NULLIF(cohort_size, 0) * 100, 2),
+            1, NULL
+        ) OVER (PARTITION BY tier_name ORDER BY cohort_month)         AS next_month_churn_proj
+    FROM cohort_monthly
 )
 SELECT
     tier_name,
-    funnel_stage,
-    product_type,
-    event_month,
-    COUNT(*)                            AS total_events,
-    SUM(is_conversion_event)            AS conversion_events,
-    SUM(is_purchase)                    AS purchase_events,
-    COUNT(DISTINCT user_id)             AS unique_users,
+    cohort_month,
+    cohort_size,
+    churned_this_month,
+    cumulative_churned,
     ROUND(
-        100 * SUM(is_purchase)
-        / NULLIF(COUNT(*), 0), 2
-    )                                   AS purchase_rate_pct,
-    ROUND(
-        100 * SUM(is_conversion_event)
-        / NULLIF(COUNT(*), 0), 2
-    )                                   AS conversion_rate_pct,
-    GROUPING(tier_name)                 AS grp_tier,
-    GROUPING(funnel_stage)              AS grp_funnel,
-    GROUPING(product_type)              AS grp_product_type,
-    GROUPING(event_month)               AS grp_month
-FROM funnel_base
-GROUP BY GROUPING SETS (
-    (tier_name, funnel_stage),
-    (tier_name, funnel_stage, product_type),
-    (tier_name, funnel_stage, event_month),
-    ()
-);
+        (cohort_size - cumulative_churned) / NULLIF(cohort_size, 0) * 100,
+        2)                                                            AS survival_rate_pct,
+    churn_rate_pct,
+    rolling_3m_churn_rate,
+    next_month_churn_proj
+FROM with_windows;
 -- ============================================================
 -- ============================================================
 -- ============================================================
