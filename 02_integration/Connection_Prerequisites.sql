@@ -35,6 +35,7 @@ END;
 -- ===============================================================================================================================
 -- OPTIONAL: This handles basic authentification for RestHeart via HTTPURITYPE. Only checks if the database server is responsive.
 -- ===============================================================================================================================
+/**
 begin
   l_req  := UTL_HTTP.begin_request(pURL);
   UTL_HTTP.set_header(l_req, 'Authorization', 'Basic ' || 
@@ -44,4 +45,4 @@ begin
   UTL_HTTP.end_response(l_resp);
   return l_buffer;
 end;
-/
+**/

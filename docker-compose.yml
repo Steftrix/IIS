@@ -120,8 +120,7 @@ services:
     ports:
       - "8081:8080"
     environment:
-      RHO: "/mclient/connection-string->'mongodb://iis_admin:iis_pass@mongodb:27017/?authSource=admin';/http-listener/host->'0.0.0.0';/mongo/mongo-mounts->[{'what':'iis_db','where':'/'}];/mongo/secured->false"
-      
+      RHO: "/mclient/connection-string->'mongodb://iis_admin:iis_pass@mongodb:27017/?authSource=admin';/http-listener/host->'0.0.0.0';/mongo/mongo-mounts->[{'what':'iis_db','where':'/'}];/mongo/secured->false;/mongo/max-pagesize->50000;/mongo/default-pagesize->25000"
 
   # ── DS_5: NEO4J 5 ─────────────────────────────────────────
   neo4j:
