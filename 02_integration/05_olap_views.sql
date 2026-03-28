@@ -232,52 +232,92 @@ LEFT JOIN monthly_totals m
 --================================================================
 --================================================================
 -- ============================================================
--- 3 : Subscription Revenue Breakdown (ROLLUP)
---
--- Purpose:
---   Hierarchical revenue aggregation across subscription tier,
---   user country, and billing quarter.
---   Produces subtotals at each level of the hierarchy plus a
---   grand total row — a classic ROLLUP pattern.
---
--- OLAP feature: ROLLUP(tier_name, country_code, quarter_no)
--- Source views: V_CONS_USER_SUBSCRIPTION, V_DIM_TIME
---
--- Output columns:
---   tier_name      - subscription plan (or NULL for subtotal/grand total)
---   country_code   - user country (or NULL for subtotal/grand total)
---   quarter_no     - billing quarter (or NULL for subtotal/grand total)
---   subscriber_count  - distinct users in that group
---   total_revenue_usd - sum of monthly prices billed
---   grouping_label    - human-readable label for the aggregation level
 -- ============================================================
+-- 3 : Geographic Market Density & Buyer-Seller Imbalance
+--      ROLLUP(activity_band, country_code) + RANK + NTILE
+--
+--   geo_banded    →  activity band derivation using PERCENTILE_CONT OVER()
+--   rollup_agg    →  ROLLUP only — no window functions
+--   detail_ranked →  NTILE / RANK on detail rows only (is_subtotal = 0)
+--   Final SELECT  →  RATIO_TO_REPORT + reconstruct subtotal rows via UNION ALL
 -- ============================================================
--- ============================================================
-CREATE OR REPLACE VIEW FDBO.V_RPT_SUB_REVENUE_ROLLUP AS
-SELECT 
-    CASE GROUPING(us.tier_name)    WHEN 1 THEN '** ALL TIERS **'    ELSE us.tier_name    END AS tier_name,
-    CASE GROUPING(us.country_code) WHEN 1 THEN '** ALL COUNTRIES **' ELSE us.country_code END AS country_code,
-    CASE GROUPING(t.quarter_no)    WHEN 1 THEN '** ALL QUARTERS **'  ELSE t.quarter_no    END AS quarter_no,
-    COUNT(DISTINCT us.user_id)                        AS subscriber_count,
-    ROUND(SUM(NVL(us.monthly_price_usd, 0)), 2)       AS total_revenue_usd,
-    CASE
-        WHEN GROUPING(us.tier_name) = 1
-         AND GROUPING(us.country_code) = 1
-         AND GROUPING(t.quarter_no) = 1
-            THEN 'Grand Total'
-        WHEN GROUPING(us.country_code) = 1
-         AND GROUPING(t.quarter_no) = 1
-            THEN 'Tier Subtotal'
-        WHEN GROUPING(t.quarter_no) = 1
-            THEN 'Country Subtotal'
-        ELSE 'Detail'
-    END                                               AS grouping_label,
-    GROUPING_ID(us.tier_name, us.country_code, t.quarter_no) AS aggregation_level
-FROM FDBO.V_CONS_USER_SUBSCRIPTION us
-JOIN FDBO.V_DIM_TIME t
-    ON t.date_key = TRUNC(CAST(us.started_at AS DATE), 'DD')
-WHERE us.price_is_active = 1
-GROUP BY ROLLUP(us.tier_name, us.country_code, t.quarter_no);
+WITH geo_banded AS (
+    SELECT
+        country_code,
+        total_users,
+        total_sellers,
+        total_orders,
+        CASE
+            WHEN total_orders >= PERCENTILE_CONT(0.66)
+                     WITHIN GROUP (ORDER BY total_orders) OVER () THEN 'High'
+            WHEN total_orders >= PERCENTILE_CONT(0.33)
+                     WITHIN GROUP (ORDER BY total_orders) OVER () THEN 'Mid'
+            ELSE 'Low'
+        END AS activity_band
+    FROM FDBO.V_DIM_GEOGRAPHY
+    WHERE country_code IS NOT NULL
+),
+rollup_agg AS (
+    SELECT
+        CASE GROUPING(activity_band) WHEN 1 THEN '** ALL BANDS **' ELSE activity_band END AS activity_band,
+        CASE GROUPING(country_code)  WHEN 1 THEN NULL               ELSE country_code  END AS country_code,
+        GROUPING(country_code)                                                             AS is_subtotal,
+        SUM(total_users)                                                                   AS total_users,
+        SUM(total_sellers)                                                                 AS total_sellers,
+        SUM(total_orders)                                                                  AS total_orders,
+        ROUND(SUM(total_users) / NULLIF(SUM(total_sellers), 0), 2)                        AS buyer_seller_ratio,
+        CASE
+            WHEN GROUPING(activity_band) = 1 AND GROUPING(country_code) = 1 THEN 'Grand Total'
+            WHEN GROUPING(country_code)  = 1                                 THEN 'Activity Band Subtotal'
+            ELSE 'Country Detail'
+        END AS grouping_label
+    FROM geo_banded
+    GROUP BY ROLLUP(activity_band, country_code)
+),
+detail_ranked AS (
+    SELECT
+        activity_band,
+        country_code,
+        is_subtotal,
+        total_users,
+        total_sellers,
+        total_orders,
+        buyer_seller_ratio,
+        grouping_label,
+        NTILE(4) OVER (ORDER BY total_orders DESC) AS order_volume_quartile,
+        RANK()   OVER (ORDER BY total_orders DESC) AS country_rank
+    FROM rollup_agg
+    WHERE is_subtotal = 0
+)
+SELECT
+    activity_band,
+    country_code,
+    total_users,
+    total_sellers,
+    total_orders,
+    buyer_seller_ratio,
+    ROUND(RATIO_TO_REPORT(total_users) OVER () * 100, 2) AS user_share_pct,
+    order_volume_quartile,
+    country_rank,
+    grouping_label
+FROM detail_ranked
+UNION ALL
+SELECT
+    activity_band,
+    country_code,
+    total_users,
+    total_sellers,
+    total_orders,
+    buyer_seller_ratio,
+    NULL AS user_share_pct,
+    NULL AS order_volume_quartile,
+    NULL AS country_rank,
+    grouping_label
+FROM rollup_agg
+WHERE is_subtotal = 1
+ORDER BY
+    grouping_label DESC, 
+    total_orders DESC NULLS LAST;
 -- ============================================================
 -- ============================================================
 -- ============================================================
