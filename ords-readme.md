@@ -130,6 +130,7 @@ FROM ords_metadata.user_ords_modules;
 
 ## 7. Custom Endpoints
 
+```sql
 BEGIN
   -------------------------------------------------------------
   -- 1. V_CONS_SUB_COHORT (Cohort Retention)
@@ -153,6 +154,7 @@ BEGIN
       p_source_type => ORDS.source_type_collection_feed, p_source => v_sql, p_items_per_page => 1000
     );
   END;
+
 
   -------------------------------------------------------------
   -- 2. V_OLAP_ENGAGEMENT_REVENUE_MONTHLY
@@ -343,9 +345,12 @@ BEGIN
 
   COMMIT;
 END;
+/
+```
 
+### Access Views
 
-//access views
+```sql
 BEGIN
   -------------------------------------------------------------
   -- 1. V_PG_ORDERS / MV_PG_ORDERS
@@ -465,3 +470,5 @@ BEGIN
 
   COMMIT;
 END;
+/
+```
